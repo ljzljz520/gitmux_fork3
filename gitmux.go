@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/arl/gitmux/json"
+	"github.com/arl/gitmux/submodule"
 	"github.com/arl/gitmux/tmux"
 )
 
@@ -91,6 +92,16 @@ func pushdir(dir string) (popdir func() error, err error) {
 	return func() error { return os.Chdir(pwd) }, nil
 }
 
+// layoutHas reports whether the layout list contains the given component.
+func layoutHas(layout []string, component string) bool {
+	for _, item := range layout {
+		if item == component {
+			return true
+		}
+	}
+	return false
+}
+
 func check(err error, dbg bool) {
 	if err == nil {
 		return
@@ -130,6 +141,18 @@ func main() {
 	var fmter formater = &tmux.Formater{Config: cfg.Tmux}
 	if dbg {
 		fmter = &json.Formater{}
+	} else if layoutHas(cfg.Tmux.Layout, "submodules") {
+		// Optional nested submodule summary. The scan is read-only (it never
+		// initializes submodules or accesses the network), bounded by the
+		// configured depth/total timeout and by the global context timeout.
+		// It never affects the parent repository counts.
+		opts := cfg.Tmux.Options
+		// We already chdir'd into dir (when given), so scan the current
+		// working directory, just like gitstatus does.
+		fmter.(*tmux.Formater).Submodules = submodule.Scan(ctx, ".", submodule.Options{
+			MaxDepth: opts.SubmoduleMaxDepth,
+			Timeout:  opts.SubmoduleTimeout.Duration(),
+		})
 	}
 
 	check(fmter.Format(os.Stdout, st), dbg)

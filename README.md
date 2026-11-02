@@ -197,6 +197,10 @@ of Git status displayed in `tmux` status string:
         insertions: Σ    # count of inserted lines (stats section).
         deletions: Δ     # count of deleted lines (stats section).
         clean: ✔         # Shown when the working tree is clean.
+        submodules: "↳ "           # nested submodule summary prefix.
+        submodule_pointer: "@"     # submodule pointer changed.
+        submodule_uninit: "○"      # submodule not initialized.
+        submodule_incomplete: "…"  # submodule summary incomplete (error/timeout).
 ```
 
 
@@ -221,6 +225,7 @@ See the [`STYLES` section](https://man7.org/linux/man-pages/man1/tmux.1.html#STY
     insertions: '#[fg=green]'       # 'insertions' count
     deletions: '#[fg=red]'          # 'deletions' count
     clean: '#[fg=green,bold]'       # 'clean' symbol
+    submodules: '#[fg=yellow]'      # nested submodule summary
 ```
 
 ### Layout components
@@ -260,6 +265,7 @@ This is the list of the possible keywords for `layout`:
 |     `remote`     | alias for `remote-branch` followed by `divergence` | `origin/main ↓·2↑·1` |
 |     `flags`      | Symbols representing the working tree state        |    `✚ 1 ⚑ 1 … 2`     |
 |     `stats`      | Insertions/deletions (lines). Disabled by default  |      `Σ56 Δ21`       |
+|   `submodules`   | Nested submodule summary. Disabled by default      | `↳ vendor/lib @ ✖1`  |
 | any string `foo` | Non-keywords are shown as-is                       |    `hello gitmux`    |
 
 
@@ -282,6 +288,35 @@ layout: [flags, " ", branch]
 ```yaml
 layout: [branch, "|", flags, "|", stats]
 ```
+```yaml
+layout: [branch, " - ", flags, " ", submodules]
+```
+
+
+### Nested submodule summary
+
+The `submodules` layout component reports the state of the repository
+submodules, recursively into nested submodules. The parent repository counts
+shown by `flags` are never modified: a submodule that looks modified from the
+parent still counts as a single modified entry there, while this component
+details what actually happens inside it.
+
+Each notable submodule is reported with its path (relative to the parent
+repository) followed by:
+
+ - `submodule_pointer` when its pointer changed (the checked-out commit differs
+   from the recorded gitlink, or the gitlink is staged),
+ - the staged/conflict/modified/untracked counts of files *inside* it,
+ - `submodule_uninit` when it is not initialized (not checked out),
+ - `submodule_incomplete` when its state could not be read.
+
+Example: `↳ vendor/lib @ ✖ 1, vendor/other ○`
+
+The scan is read-only: it never initializes a submodule and never accesses the
+network. Traversal is bounded by `submodule_max_depth` and the total
+`submodule_timeout` budget (the global `-timeout` flag still applies). On
+timeout or read error the component ends with the `submodule_incomplete`
+marker, so a truncated result is always identifiable.
 
 
 ### Additional options
@@ -297,6 +332,9 @@ This is the list of additional configuration `options`:
 | `swap_divergence`    | Swaps order of behind & ahead upstream counts                                   |      `false`       |
 | `divergence_space`   | Add a space between behind & ahead upstream counts                              |      `false`       |
 | `flags_without_count`| Show flags symbols without counts*                                              |      `false`       |
+| `submodule_max_depth` | Maximum depth scanned by the `submodules` component (`1` = direct only, `0` disables the scan) | `3` |
+| `submodule_timeout`  | Total time budget for the nested submodule scan, e.g. `500ms` (`0` = only `-timeout` applies) | `500ms` |
+| `submodule_max_shown` | Maximum number of submodule entries displayed (`0` = no limit)                 |   `0` (no limit)   |
 
 *When `flags_without_count` is true, shows only symbols (empty symbols show nothing). When false (default), shows symbols with counts (empty symbols show counts only).
 

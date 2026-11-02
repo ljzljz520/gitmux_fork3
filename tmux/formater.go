@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/arl/gitstatus"
 	"gopkg.in/yaml.v3"
+
+	"github.com/arl/gitmux/submodule"
 )
 
 // Config is the configuration of the Git status tmux formatter.
@@ -39,6 +42,11 @@ type symbols struct {
 
 	Insertions string // Insertions is the string shown before the count of inserted lines.
 	Deletions  string // Deletions is the string shown before the count of deleted lines.
+
+	Submodules          string // Submodules is the string shown before the nested submodule summary.
+	SubmodulePointer    string `yaml:"submodule_pointer"`    // SubmodulePointer marks a submodule whose pointer changed.
+	SubmoduleUninit     string `yaml:"submodule_uninit"`     // SubmoduleUninit marks an uninitialized submodule.
+	SubmoduleIncomplete string `yaml:"submodule_incomplete"` // SubmoduleIncomplete marks a submodule summary that could not be fully read.
 }
 
 type styles struct {
@@ -59,6 +67,8 @@ type styles struct {
 
 	Insertions string // Insertions is the style string printed before the count of inserted lines.
 	Deletions  string // Deletions is the style string printed before the count of deleted lines.
+
+	Submodules string `yaml:"submodules"` // Submodules is the style string printed before the nested submodule summary.
 }
 
 const (
@@ -95,12 +105,46 @@ type options struct {
 	DivergenceSpace   bool      `yaml:"divergence_space"`
 	SwapDivergence    bool      `yaml:"swap_divergence"`
 	FlagsWithoutCount bool      `yaml:"flags_without_count"`
+
+	// SubmoduleMaxDepth bounds the depth of the nested submodule scan (1 =
+	// direct submodules only). 0 disables the scan.
+	SubmoduleMaxDepth int `yaml:"submodule_max_depth"`
+	// SubmoduleTimeout is the total time budget for the nested submodule
+	// scan (for example "500ms"). 0 means no extra timeout.
+	SubmoduleTimeout Duration `yaml:"submodule_timeout"`
+	// SubmoduleMaxShown bounds the number of submodule entries displayed. 0
+	// means unlimited.
+	SubmoduleMaxShown int `yaml:"submodule_max_shown"`
 }
+
+// Duration is a time.Duration that can be decoded from a YAML string such as
+// "500ms" or "2s".
+type Duration time.Duration
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	du, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = Duration(du)
+	return nil
+}
+
+// Duration returns the underlying time.Duration.
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 // A Formater formats git status to a tmux style string.
 type Formater struct {
 	Config
 	st *gitstatus.Status
+	// Submodules is the optional nested submodule summary, attached by the
+	// caller when the layout includes the 'submodules' component.
+	Submodules *submodule.Summary
 }
 
 // truncate returns s, truncated so that it is no more than max runes long.
@@ -200,6 +244,8 @@ func (f *Formater) format() string {
 			comps = append(comps, f.flags())
 		case "stats":
 			comps = append(comps, f.stats())
+		case "submodules":
+			comps = append(comps, f.submodules())
 		default:
 			sb.WriteString(joinComps())
 			sb.WriteString(f.Styles.Clear)
@@ -300,7 +346,7 @@ func (f *Formater) appendFlag(flags []string, style, symbol string, count int) [
 	if count == 0 {
 		return flags
 	}
-	
+
 	if f.Options.FlagsWithoutCount {
 		// When flags_without_count is true, show symbol only (empty string if symbol is empty)
 		if symbol == "" {
@@ -308,7 +354,7 @@ func (f *Formater) appendFlag(flags []string, style, symbol string, count int) [
 		}
 		return append(flags, fmt.Sprintf("%s%s", style, symbol))
 	}
-	
+
 	// When flags_without_count is false, show symbol + count, or just count if symbol is empty
 	return append(flags, fmt.Sprintf("%s%s%d", style, symbol, count))
 }
@@ -341,6 +387,121 @@ func (f *Formater) flags() string {
 	}
 
 	return ""
+}
+
+// submoduleNotable reports whether a submodule state carries something to
+// display. Fully initialized, clean submodules are hidden.
+func submoduleNotable(st *submodule.State) bool {
+	return st.Uninitialized || st.PointerChanged || st.Conflict ||
+		st.NumStaged > 0 || st.NumConflicts > 0 || st.NumModified > 0 ||
+		st.NumUntracked > 0 || st.Incomplete
+}
+
+// submoduleEntry renders a single submodule state: its path followed by the
+// pointer marker, internal change flags (staged/conflict/modified/untracked),
+// the uninitialized marker and the incomplete marker.
+func (f *Formater) submoduleEntry(st *submodule.State) string {
+	sb := strings.Builder{}
+	sb.WriteString(f.Styles.Clear)
+	sb.WriteString(f.Styles.Submodules)
+	sb.WriteString(st.Path)
+
+	marker := func(sym string) {
+		if sym == "" {
+			return
+		}
+		sb.WriteString(" ")
+		sb.WriteString(f.Styles.Clear)
+		sb.WriteString(f.Styles.Submodules)
+		sb.WriteString(sym)
+	}
+
+	if st.PointerChanged {
+		marker(f.Symbols.SubmodulePointer)
+	}
+
+	// A conflicted gitlink in the superproject counts as one conflict, in
+	// addition to conflicts internal to the submodule.
+	nConflict := st.NumConflicts
+	if st.Conflict {
+		nConflict++
+	}
+
+	var flags []string
+	flags = f.appendFlag(flags, f.Styles.Staged, f.Symbols.Staged, st.NumStaged)
+	flags = f.appendFlag(flags, f.Styles.Conflict, f.Symbols.Conflict, nConflict)
+	flags = f.appendFlag(flags, f.Styles.Modified, f.Symbols.Modified, st.NumModified)
+	flags = f.appendFlag(flags, f.Styles.Untracked, f.Symbols.Untracked, st.NumUntracked)
+	if len(flags) > 0 {
+		sb.WriteString(" ")
+		sb.WriteString(strings.Join(flags, " "))
+	}
+
+	if st.Uninitialized {
+		marker(f.Symbols.SubmoduleUninit)
+	}
+	if st.Incomplete {
+		marker(f.Symbols.SubmoduleIncomplete)
+	}
+	return sb.String()
+}
+
+// submodules renders the optional nested submodule summary. Parent repository
+// counts are never modified by this summary: submodule states are reported in
+// this dedicated component only.
+func (f *Formater) submodules() string {
+	sum := f.Submodules
+	if sum == nil {
+		return ""
+	}
+
+	var entries []string
+	hidden := 0
+	for _, st := range sum.States {
+		if !submoduleNotable(st) {
+			continue
+		}
+		if max := f.Options.SubmoduleMaxShown; max > 0 && len(entries) >= max {
+			hidden++
+			continue
+		}
+		entries = append(entries, f.submoduleEntry(st))
+	}
+
+	if len(entries) == 0 && hidden == 0 && !sum.Incomplete {
+		return ""
+	}
+
+	// Segments joined with ", ". The optional prefix symbol is not a
+	// segment (it may itself end with a space).
+	segs := entries
+	if hidden > 0 {
+		segs = append(segs, fmt.Sprintf("+%d", hidden))
+	}
+	if sum.Incomplete {
+		// The traversal timed out or failed to read some submodule.
+		if f.Symbols.SubmoduleIncomplete != "" {
+			segs = append(segs, f.Symbols.SubmoduleIncomplete)
+		} else {
+			segs = append(segs, "?")
+		}
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString(f.Styles.Clear)
+	sb.WriteString(f.Styles.Submodules)
+	if f.Symbols.Submodules != "" {
+		sb.WriteString(f.Symbols.Submodules)
+	}
+	for i, seg := range segs {
+		if i > 0 {
+			sb.WriteString(f.Styles.Clear)
+			sb.WriteString(f.Styles.Submodules)
+			sb.WriteString(", ")
+		}
+		sb.WriteString(seg)
+	}
+	return sb.String()
 }
 
 func (f *Formater) stats() string {

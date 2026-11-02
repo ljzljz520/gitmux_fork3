@@ -26,6 +26,14 @@ tmux:
         deletions: Δ
         # Shown when the working tree is clean.
         clean: ✔
+        # nested submodule summary prefix (shown by the 'submodules' layout component).
+        submodules: "↳ "
+        # submodule whose checked-out commit differs from the recorded pointer.
+        submodule_pointer: "@"
+        # uninitialized submodule (not checked out).
+        submodule_uninit: "○"
+        # submodule summary could not be fully read (error or timeout).
+        submodule_incomplete: "…"
 
     # Styles are tmux format strings used to specify text colors and attributes
     # of Git status elements. See the STYLES section of tmux man page.
@@ -57,6 +65,8 @@ tmux:
         deletions: "#[fg=red]"
         # 'clean' symbol
         clean: "#[fg=green,bold]"
+        # nested submodule summary
+        submodules: "#[fg=yellow]"
 
     # The layout section defines what components gitmux shows and the order in
     # which they appear on tmux status bar.
@@ -68,6 +78,7 @@ tmux:
     #  - remote:            alias for `remote-branch` followed by `divergence`, for example: `origin/main ↓·2↑·1`
     #  - flags:             symbols representing the working tree state, for example `✚ 1 ⚑ 1 … 2`
     #  - stats:             insertions/deletions (lines), for example`Σ56 Δ21`
+    #  - submodules:        nested submodule summary, for example `↳ vendor/lib @ ✖1, vendor/other ○`
     #  - some string `foo`: any other character of string is directly shown, for example `foo` or `|`
     layout: [branch, remote-branch, divergence, " - ", flags]
 
@@ -89,3 +100,14 @@ tmux:
         # When true, shows only symbols (empty symbols show nothing).
         # When false (default), shows symbols with counts (empty symbols show counts only).
         flags_without_count: false
+        # Maximum nesting depth scanned for the 'submodules' component (1 =
+        # direct submodules only). 0 disables the nested scan.
+        submodule_max_depth: 3
+        # Total time budget for the nested submodule scan, for example
+        # "500ms" or "2s". 0 means no extra timeout (the global -timeout flag
+        # still applies). The scan never initializes submodules or accesses
+        # the network; on timeout/failure the summary is marked incomplete.
+        submodule_timeout: 500ms
+        # Maximum number of submodule entries shown by the 'submodules'
+        # component (extra entries are reported as "+N"). 0 means unlimited.
+        submodule_max_shown: 0
